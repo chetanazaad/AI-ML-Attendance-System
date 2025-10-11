@@ -1,0 +1,13 @@
+# Ignore the Python Virtual Environment
+venv310/
+venv/
+
+# Ignore the log and cached files
+*.csv
+__pycache__/
+
+# Ignore Operating System files
+.DS_Store
+
+# Ignore editor files
+.vscode/
