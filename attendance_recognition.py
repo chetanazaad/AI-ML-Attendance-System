@@ -1,13 +1,40 @@
-import cv2                        # The go-to library for webcam and image handling
-import face_recognition           # Core ML engine for encoding and comparing faces
-import os                         # OS utilities for navigating the filesystem
-from datetime import datetime     # Gotta time the log entries
-import numpy as np                # For fast math (distance calculation)
+import cv2
+import face_recognition
+import os
+import numpy as np
+import requests # Used to send data to the Flask API
 
 # --- Configuration: Tweak These ---
-KNOWN_FACES_DIR = "training_images"  # Our database location
-ATTENDANCE_FILE = "attendance_log.csv" # The log file
-TOLERANCE = 0.52                      # How strict the face match needs to be (0.6 is usually fine)
+KNOWN_FACES_DIR = "training_images" 
+TOLERANCE = 0.52                    # Strictness setting for match
+API_ENDPOINT = "http://127.0.0.1:5000/api/attendance/mark" # URL of the Flask endpoint
+
+# --- API Interaction Function ---
+# This replaces the old log_attendance (CSV) function
+def mark_attendance_via_api(face_id_name):
+    """Sends the recognized face ID to the running Flask backend."""
+    
+    # Payload must match what Flask expects: a JSON with 'face_id'
+    payload = {
+        "face_id": face_id_name.lower().replace(' ', '_') 
+    }
+
+    try:
+        # Send the POST request to the Flask server
+        response = requests.post(API_ENDPOINT, json=payload)
+        
+        if response.status_code == 201:
+            print(f"[API SUCCESS] Attendance marked for {face_id_name}.")
+        else:
+            # Handle non-201 responses (like 404 Not Found or potential 409 Conflict if implemented later)
+            error_msg = response.json().get('error', 'Unknown server issue.')
+            print(f"[API FAIL] Status {response.status_code}: {error_msg}")
+
+    except requests.exceptions.ConnectionError:
+        print("[API FATAL] Could not connect to Flask server. Is app.py running?")
+    except Exception as e:
+        print(f"[API ERROR] An unexpected error occurred: {e}")
+
 
 # --- Data Loading (Startup) ---
 def load_known_faces():
@@ -17,7 +44,6 @@ def load_known_faces():
     
     print("Building face database...")
 
-    # Iterate through all known people's folders
     for name in os.listdir(KNOWN_FACES_DIR):
         if name.startswith('.'):
             continue
@@ -26,51 +52,15 @@ def load_known_faces():
         for filename in os.listdir(person_dir):
             path = os.path.join(person_dir, filename)
             
-            # Load the image and get the 128-D face vector
             image = face_recognition.load_image_file(path)
             encodings = face_recognition.face_encodings(image)
             
             if encodings:
-                # Store the face's digital 'fingerprint'
                 known_face_encodings.append(encodings[0])
                 known_face_names.append(name.replace('_', ' ').title())
 
     print(f"Database built with {len(known_face_encodings)} faces.")
     return known_face_encodings, known_face_names
-
-
-# --- Attendance Logic ---
-def log_attendance(name):
-    """Logs the entry, checking if they're already logged in the last hour."""
-    
-    with open(ATTENDANCE_FILE, 'r+') as f:
-        log_data = f.readlines()
-        recently_logged = [] 
-        
-        # Check entries against the 3600-second (1 hour) timeout
-        for line in log_data:
-            entry = line.split(',')
-            try:
-                log_time = datetime.strptime(entry[1].strip(), '%Y-%m-%d %H:%M:%S')
-                if (datetime.now() - log_time).total_seconds() < 3600:
-                    recently_logged.append(entry[0].strip())
-            except:
-                pass # Skip the header or bad lines
-
-        # Log only if they are not already on the recent list
-        if name not in recently_logged:
-            now = datetime.now()
-            dt_string = now.strftime('%Y-%m-%d %H:%M:%S')
-            f.writelines(f'\n{name}, {dt_string}')
-            print(f"ATTENDANCE LOGGED: {name} at {dt_string}")
-            return True
-        return False
-
-# Initialize the CSV log file if it's the first run
-if not os.path.exists(ATTENDANCE_FILE):
-    with open(ATTENDANCE_FILE, 'w') as f:
-        f.write('Name, Timestamp\n')
-    print(f"Created new attendance log: {ATTENDANCE_FILE}")
 
 # --- Main Video Loop ---
 
@@ -91,10 +81,9 @@ while True:
     # Process the frame at 1/4 size for major speed boost
     small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
     
-    # Gotta convert the color format for the ML model
+    # Color space conversion: OpenCV (BGR) -> face_recognition (RGB)
     rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-    # Detect faces and generate live encodings
     face_locations = face_recognition.face_locations(rgb_small_frame)
     face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
@@ -111,10 +100,13 @@ while True:
         # Final decision: if best match is within our strictness tolerance
         if matches[best_match_index] and face_distances[best_match_index] < TOLERANCE:
             name = known_face_names[best_match_index]
-            log_attendance(name) # Success! Log it.
+            
+            # --- CORE INTEGRATION POINT ---
+            mark_attendance_via_api(name) # Success! Send to Flask API/DB
+            
             name_label = name
         else:
-            # Custom message for unknown faces
+            # Display custom message for unknown users
             name_label = "Face not match - UPDATE DATABASE" 
 
         # Scale coordinates back up to the original frame size
